@@ -18,6 +18,7 @@ import android.widget.Spinner
 import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
+import rikka.shizuku.Shizuku
 
 class MainActivity : Activity() {
 
@@ -51,8 +52,8 @@ class MainActivity : Activity() {
         try {
             if (global) Settings.Global.putInt(contentResolver, k, v)
             else Settings.System.putInt(contentResolver, k, v)
-        } catch (e: SecurityException) {
-            Toast.makeText(this, "Нет права записи (см. красный текст сверху)", Toast.LENGTH_LONG).show()
+        } catch (e: Exception) {
+            Toast.makeText(this, "Не записалось: ${e.javaClass.simpleName}", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -81,14 +82,48 @@ class MainActivity : Activity() {
         codeText.text = "Код: $v"
     }
 
+    private fun toast(t: String) = Toast.makeText(this, t, Toast.LENGTH_LONG).show()
+
+    // Ключи вентилятора лежат в system: приложению туда писать нельзя, shell (Shizuku) можно
+    private fun runShell(cmd: String) {
+        try {
+            if (!Shizuku.pingBinder()) {
+                toast("Запустите Shizuku")
+                return
+            }
+            if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
+                Shizuku.requestPermission(1)
+                toast("Подтвердите доступ Shizuku и нажмите ещё раз")
+                return
+            }
+        } catch (e: Throwable) {
+            toast("Shizuku недоступен")
+            return
+        }
+        Thread {
+            val ok = try {
+                val m = Shizuku::class.java.getDeclaredMethod(
+                    "newProcess", Array<String>::class.java, Array<String>::class.java, String::class.java
+                )
+                m.isAccessible = true
+                val pr = m.invoke(null, arrayOf("sh", "-c", cmd), null, null) as Process
+                pr.waitFor() == 0
+            } catch (e: Throwable) {
+                false
+            }
+            runOnUiThread {
+                if (!ok) toast("Команда не выполнилась")
+                refreshFan()
+            }
+        }.start()
+    }
+
     private fun refreshFan() {
         fanText.text = "manual=${sInt("fan_state_of_manual")} mode=${sInt("fan_state_of_mode")}"
     }
 
     private fun fan(manual: Int, mode: Int) {
-        put(false, "fan_state_of_manual", manual)
-        put(false, "fan_state_of_mode", mode)
-        refreshFan()
+        runShell("settings put system fan_state_of_manual $manual; settings put system fan_state_of_mode $mode")
     }
 
     private fun allKeys() =
@@ -104,12 +139,14 @@ class MainActivity : Activity() {
 
     private fun restore() {
         val p = getSharedPreferences("bk", MODE_PRIVATE)
+        val cmds = ArrayList<String>()
         for ((g, k) in allKeys()) {
             val v = p.getInt(k, -1)
-            if (v >= 0) put(g, k, v)
+            if (v < 0) continue
+            if (g) put(true, k, v) else cmds.add("settings put system $k $v")
         }
         loadLamp()
-        refreshFan()
+        if (cmds.isNotEmpty()) runShell(cmds.joinToString("; "))
         Toast.makeText(this, "Значения возвращены", Toast.LENGTH_SHORT).show()
     }
 
